@@ -149,6 +149,10 @@ def cli():
     {style("DATA_DIR", fg="green")} is the output directory
     where the methylation data will be stored.
 
+    Alternatively, you can provide a single file that contains the methylation
+    data of all cells, plus one extra column holding the cell barcode. In that
+    case, specify the barcode column with {style("--barcode-column", fg="green")}.
+
     Note: If you have many cells and encounter a "too many open files"-
     error, you need to increase the open file limit with e.g.
     'ulimit -n 99999'.
@@ -206,6 +210,19 @@ def cli():
     6. Either '1' if the file has a header or '0' if it does not have a header
     All column numbers are 1-indexed, i.e. to define the first column use '1' and not
     '0'.""",
+)
+@click.option(
+       "--barcode-column",
+       default=None,
+       type=click.IntRange(min=1),
+       metavar="INTEGER",
+       help="""
+       Instead of providing one methylation file per cell, provide a single file
+       that contains the data of all cells, and specify here the 1-indexed number
+       of the column that holds the cell barcode. The barcodes are used as cell
+       names, in order of their first appearance in the file. Requires exactly
+       one input file.
+       """,
 )
 def prepare_cli(**kwargs):
     from .prepare import prepare

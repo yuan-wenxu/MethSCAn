@@ -13,25 +13,49 @@ from . import __version__
 from .utils import echo, secho
 
 
-def prepare(input_files, data_dir, input_format, round_sites, chunksize):
+def prepare(
+    input_files, data_dir, input_format, round_sites, chunksize, barcode_column=None
+):
     input_files = sorted(input_files)  # ensure output mtx is ordered consistently
     begin_time = datetime.now()  # to log runtime
-    cell_names = _get_cell_names(input_files)
-    n_cells = len(cell_names)
+    if barcode_column is None:
+        cell_names = _get_cell_names(input_files)
+    else:
+        if len(input_files) != 1:
+            raise Exception(
+                "--barcode-column requires exactly one input file that contains "
+                "the methylation data of all cells."
+            )
+        # cell names are the barcodes, they are discovered while parsing
+        cell_names = None
+    n_cells = None if cell_names is None else len(cell_names)
     os.makedirs(data_dir, exist_ok=True)
-    # we use this opportunity to count some basic summary stats
-    n_obs_cell = np.zeros(n_cells, dtype=np.int64)
-    n_meth_cell = np.zeros(n_cells, dtype=np.int64)
 
     # For each chromosome, we first make a sparse matrix in COO (coordinate)
     # format, because COO can be constructed value by value, without knowing the
     # dimensions beforehand. This means we can construct it cell by cell.
     # We dump the COO to hard disk to save RAM and then later convert each COO to a
     # more efficient format (CSR).
-    echo(f"Processing {n_cells} methylation files...")
-    chrom_sizes = _dump_coo_files(
-        input_files, input_format, n_cells, data_dir, round_sites, chunksize
+    if cell_names is None:
+        echo("Parsing combined methylation file...")
+    else:
+        echo(f"Processing {n_cells} methylation files...")
+    chrom_sizes, barcode_to_idx = _dump_coo_files(
+        input_files,
+        input_format,
+        n_cells,
+        data_dir,
+        round_sites,
+        chunksize,
+        barcode_column,
     )
+    if cell_names is None:
+        cell_names = list(barcode_to_idx.keys())
+        n_cells = len(cell_names)
+    # we use this opportunity to count some basic summary stats
+    n_obs_cell = np.zeros(n_cells, dtype=np.int64)
+    n_meth_cell = np.zeros(n_cells, dtype=np.int64)
+
     echo(
         "\nStoring methylation data in 'compressed "
         "sparse row' (CSR) matrix format for future use."
@@ -110,7 +134,9 @@ def _get_cell_names(cov_files):
     return names
 
 
-def _dump_coo_files(fpaths, input_format, n_cells, output_dir, round_sites, chunksize):
+def _dump_coo_files(
+    fpaths, input_format, n_cells, output_dir, round_sites, chunksize, barcode_col=None
+):
     try:
         c_col, p_col, m_col, u_col, coverage, onlyrel, sep, header = _human_to_computer(
             input_format
@@ -121,16 +147,31 @@ def _dump_coo_files(fpaths, input_format, n_cells, output_dir, round_sites, chun
             "include 'bismark', 'allc', 'methylpy' or a custom ':'-separated format "
             "(check 'methscan prepare --help' for details)."
         ).with_traceback(sys.exc_info()[2])
+    if barcode_col is not None:
+        barcode_col = barcode_col - 1  # CLI value is 1-indexed, columns are 0-indexed
 
     coo_files = {}
     chrom_sizes = {}
-    for cell_n, cov_file in enumerate(fpaths):
-        if cell_n % 50 == 0:
-            echo("{0:.2f}% done...".format(100 * cell_n / n_cells))
+    barcode_to_idx = {}
+    cell_n = -1
+    for cov_file in fpaths:
+        if barcode_col is None:
+            cell_n += 1
+            if cell_n % 50 == 0:
+                echo("{0:.2f}% done...".format(100 * cell_n / n_cells))
         for line_vals in _iterate_covfile(
-            cov_file, c_col, p_col, m_col, u_col, coverage, onlyrel, sep, header
+            cov_file, c_col, p_col, m_col, u_col, coverage, onlyrel, sep, header,
+            barcode_col,
         ):
-            chrom, genomic_pos, n_meth, n_unmeth = line_vals
+            if barcode_col is None:
+                chrom, genomic_pos, n_meth, n_unmeth = line_vals
+            else:
+                chrom, genomic_pos, n_meth, n_unmeth, barcode = line_vals
+                n_barcodes = len(barcode_to_idx)
+                cell_n = barcode_to_idx.setdefault(barcode, n_barcodes)
+                if cell_n == n_barcodes and cell_n % 50 == 0:
+                    # a new barcode was just discovered
+                    echo(f"Found {cell_n + 1} cell barcodes so far...")
             # to make the individual coo files smaller, we split each chromosome
             # into chunks (of size 10 Mbp by default)
             chrom_chunk = int(genomic_pos // chunksize)
@@ -163,7 +204,7 @@ def _dump_coo_files(fpaths, input_format, n_cells, output_dir, round_sites, chun
         # they're closed even when crashing
         fhandle.close()
     echo("100% done.")
-    return chrom_sizes
+    return chrom_sizes, barcode_to_idx
 
 
 def _iter_chunks(data_dir, chrom):
@@ -358,7 +399,7 @@ def _create_standard_format(format_name):
 
 
 def _iterate_covfile(
-    cov_file, c_col, p_col, m_col, u_col, coverage, onlyrel, sep, header
+    cov_file, c_col, p_col, m_col, u_col, coverage, onlyrel, sep, header, barcode_col=None
 ):
     try:
         if cov_file.lower().endswith(".gz"):
@@ -375,6 +416,7 @@ def _iterate_covfile(
                         u_col,
                         coverage,
                         onlyrel,
+                        barcode_col,
                     )
         else:
             # handle uncompressed file
@@ -390,6 +432,7 @@ def _iterate_covfile(
                         u_col,
                         coverage,
                         onlyrel,
+                        barcode_col,
                     )
     # we add the name of the file which caused the crash so that the user can fix it
     except Exception as exc:
@@ -398,7 +441,9 @@ def _iterate_covfile(
         )
 
 
-def _line_to_values(line, c_col, p_col, m_col, u_col, coverage, onlyrel):
+def _line_to_values(
+    line, c_col, p_col, m_col, u_col, coverage, onlyrel, barcode_col=None
+):
     chrom = line[c_col]
     pos = int(line[p_col])
     if onlyrel:
@@ -410,4 +455,6 @@ def _line_to_values(line, c_col, p_col, m_col, u_col, coverage, onlyrel):
             n_unmeth = int(line[u_col]) - n_meth
         else:
             n_unmeth = int(line[u_col])
-    return chrom, pos, n_meth, n_unmeth
+    if barcode_col is None:
+        return chrom, pos, n_meth, n_unmeth
+    return chrom, pos, n_meth, n_unmeth, line[barcode_col]
