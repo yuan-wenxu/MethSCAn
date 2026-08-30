@@ -279,12 +279,18 @@ def _human_to_computer(file_format):
 
 
 def _write_summary_stats(data_dir, cell_names, n_obs, n_meth):
+    global_meth_frac = np.divide(
+        n_meth,
+        n_obs,
+        out=np.full(n_obs.shape, np.nan, dtype=float),
+        where=n_obs != 0,
+    )
     stats_df = pd.DataFrame(
         {
             "cell_name": cell_names,
             "n_obs": n_obs,
             "n_meth": n_meth,
-            "global_meth_frac": np.divide(n_meth, n_obs),
+            "global_meth_frac": global_meth_frac,
         }
     )
     out_path = os.path.join(data_dir, "cell_stats.csv")

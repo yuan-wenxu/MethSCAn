@@ -3,6 +3,7 @@ import shutil
 from csv import DictReader
 from glob import glob
 from datetime import datetime
+from math import isfinite
 
 import scipy.sparse as sp_sparse
 
@@ -38,19 +39,28 @@ def _filter_by_name(file, cell_stats_path, keep=True):
 def _filter_by_thresholds(min_sites, max_sites, min_meth, max_meth, cell_stats_path):
     cells_to_keep_idx = []
     counter = {"min-sites": 0, "max-sites": 0, "min-meth": 0, "max-meth": 0}
+    undefined_meth = 0
     with open(cell_stats_path, "r") as stats_csv:
         reader = DictReader(stats_csv)
         n_cells = 0
         for cell_i, row in enumerate(reader):
             n_cells += 1
             n_sites = int(row["n_obs"])
-            meth_frac = float(row["global_meth_frac"])
             if min_sites and n_sites < min_sites:
                 counter["min-sites"] += 1
                 continue
             if max_sites and n_sites > max_sites:
                 counter["max-sites"] += 1
                 continue
+            if min_meth or max_meth:
+                try:
+                    meth_frac = float(row["global_meth_frac"])
+                except (TypeError, ValueError):
+                    undefined_meth += 1
+                    continue
+                if not isfinite(meth_frac):
+                    undefined_meth += 1
+                    continue
             if min_meth and meth_frac < (min_meth / 100):
                 counter["min-meth"] += 1
                 continue
@@ -61,6 +71,11 @@ def _filter_by_thresholds(min_sites, max_sites, min_meth, max_meth, cell_stats_p
     for threshold, count in counter.items():
         if count:
             echo(f"{count} cells did not pass the --{threshold} threshold.")
+    if undefined_meth:
+        echo(
+            f"{undefined_meth} cells had an undefined global methylation "
+            "fraction and were discarded."
+        )
     return cells_to_keep_idx, n_cells
 
 
